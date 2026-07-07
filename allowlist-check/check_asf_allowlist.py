@@ -158,16 +158,8 @@ def build_gh_pr_command(action_name: str, refs: list[str], repo_name: str) -> st
     pinned version entries into ``actions.yml`` in alphabetical order, and
     opens a pull request — all via the ``gh`` CLI with no manual file editing
     required.
-
-    Args:
-        action_name: The action name (e.g. ``"owner/action"``).
-        refs: Full action refs for this action (e.g. ``["owner/action@sha"]``).
-        repo_name: Value of ``$GITHUB_REPOSITORY`` (may be empty).
-
-    Returns:
-        str: A copy-pasteable shell script.
     """
-    branch = f"allowlist-add-{action_name.replace('/', '-')}"
+    branch_base = f"allowlist-add-{action_name.replace('/', '-')}"
     title = f"Add {action_name} to the GitHub Actions allowlist"
 
     body_lines = [f"Add `{action_name}` to the allowlist:", ""]
@@ -179,21 +171,25 @@ def build_gh_pr_command(action_name: str, refs: list[str], repo_name: str) -> st
 
     ref_args = " ".join(shlex.quote(r) for r in sorted(refs))
 
-    inserter_url = (
-        "https://raw.githubusercontent.com/apache/infrastructure-actions/"
-        "main/allowlist-check/insert_actions.py"
-    )
-
     return (
-        f"( set -e; _d=$(mktemp -d); trap 'rm -rf \"$_d\"' EXIT; cd \"$_d\"\n"
-        f"  gh repo fork apache/infrastructure-actions --clone -- --depth=1\n"
-        f"  cd infrastructure-actions\n"
-        f"  git checkout -b {shlex.quote(branch)}\n"
-        f"  curl -fsSL {shlex.quote(inserter_url)} | python3 - actions.yml {ref_args}\n"
-        f"  git add actions.yml\n"
-        f"  git commit -m {shlex.quote(f'Add {action_name} to allowlist')}\n"
-        f"  git push -u origin {shlex.quote(branch)}\n"
-        f"  gh pr create --repo apache/infrastructure-actions --head \"$(gh api user -q .login):{shlex.quote(branch)}\""
+        f"( set -euo pipefail\n"
+        f" repo=apache/infrastructure-actions\n"
+        f" branch={shlex.quote(branch_base)}-$(date +%Y%m%d%H%M%S)-$$\n"
+        f" user=\"$(gh api user -q .login)\"\n"
+        f" _d=$(mktemp -d); trap 'rm -rf \"$_d\"' EXIT\n"
+        f" gh repo fork \"$repo\" --clone=false --default-branch-only 2>/dev/null || gh repo view \"$user/infrastructure-actions\" >/dev/null\n"
+        f" git clone --depth=1 \"https://github.com/$repo.git\" \"$_d/infrastructure-actions\"\n"
+        f" cd \"$_d/infrastructure-actions\"\n"
+        f" git switch -c \"$branch\"\n"
+        f" python3 allowlist-check/insert_actions.py actions.yml {ref_args}\n"
+        f" git diff --quiet -- actions.yml && {{ echo \"No change needed; already allowlisted.\"; exit 0; }}\n"
+        f" [ \"$(git diff --name-only)\" = \"actions.yml\" ] || {{ echo \"unexpected files changed:\"; git diff --name-only; exit 1; }}\n"
+        f" git diff --check\n"
+        f" git add actions.yml\n"
+        f" git commit -m {shlex.quote(f'Add {action_name} to allowlist')}\n"
+        f" git remote add fork \"https://github.com/$user/infrastructure-actions.git\"\n"
+        f" git push -u fork \"HEAD:$branch\"\n"
+        f" gh pr create --repo \"$repo\" --base main --head \"$user:$branch\""
         f" --title {shlex.quote(title)}"
         f" --body {shlex.quote(body)} )\n"
     )
